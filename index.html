@@ -413,9 +413,9 @@
                             properties: {
                                 id: { type: 'integer' },
                                 quote: { type: 'string' },
-                                points: { type: 'integer' }
+                                verdict: { type: 'string', enum: ['full', 'partial', 'none'] }
                             },
-                            required: ['id', 'quote', 'points']
+                            required: ['id', 'quote', 'verdict']
                         }
                     },
                     feedback: { type: 'string' }
@@ -426,13 +426,13 @@
             messages: [
                 {
                     role: 'system',
-                    content: 'You are a strict but fair teacher. You check ONE student answer against a list of rubric criteria. For each criterion, first copy the exact words from the student answer that satisfy it (3 to 25 words, copied word for word). If the student answer has no such words, use an empty quote and give 0 points. Never give credit for something the student did not write. Reply with JSON only.'
+                    content: 'You are a strict but fair teacher. You check ONE student answer against a list of rubric criteria. For each criterion, give a verdict: "full" if the answer clearly says what the criterion asks, "partial" if it only half says it or is vague, "none" if it does not say it. For "full" and "partial", first copy the exact words from the student answer that show it (3 to 25 words, copied word for word). For "none", use an empty quote. Never give credit for something the student did not write. Reply with JSON only.'
                 },
                 {
                     role: 'user',
                     content: 'Task:\n' + sample.question + '\n\nCriteria:\n' + list +
                              '\n\nStudent answer:\n"""\n' + sample.answer + '\n"""' +
-                             '\n\nReturn JSON like {"criteria":[{"id":1,"quote":"words copied from the answer","points":0}],"feedback":"..."} with one entry for every criterion, in order. "points" is a whole number from 0 up to that criterion\'s maximum. "feedback" is two short sentences to the student that mention only what the student actually wrote.'
+                             '\n\nReturn JSON like {"criteria":[{"id":1,"quote":"exact words from the answer","verdict":"full, partial or none"}],"feedback":"..."} with one entry for every criterion, in order. "verdict" is "full" if the answer clearly says what the criterion asks, "partial" if it only half says it or is vague, "none" if it does not say it. "feedback" is two short sentences to the student that mention only what the student actually wrote.'
                 }
             ]
         };
@@ -482,7 +482,8 @@
             const breakdown = rubric.criteria.map(function (c, i) {
                 // Match by id; if the model skipped ids, fall back to the same position in the list.
                 const item = parsed.criteria.find(function (x) { return Number(x.id) === i + 1; }) || parsed.criteria[i] || null;
-                const modelPoints = item ? Math.min(c.max, Math.max(0, Math.round(Number(item.points) || 0))) : 0;
+                const verdict = item ? String(item.verdict || '').trim().toLowerCase() : 'none';
+                const modelPoints = verdict === 'full' ? c.max : (verdict === 'partial' ? Math.ceil(c.max / 2) : 0);
                 const quote = item ? String(item.quote || '') : '';
                 let points = modelPoints;
                 let status = 'ok';
@@ -503,7 +504,7 @@
                 total += points;
                 maxTotal += c.max;
 
-                return { text: c.text, max: c.max, modelPoints: modelPoints, points: points, quote: quote, status: status };
+                return { text: c.text, max: c.max, verdict: verdict, modelPoints: modelPoints, points: points, quote: quote, status: status };
             });
 
             const wanted = parseInt(sample.max, 10) || 10;
@@ -550,7 +551,7 @@
         return '<table><tr><th>Criterion</th><th>Model said</th><th>Final</th><th>Evidence quoted</th></tr>' +
             rows.map(function (b) {
                 const flag = b.status === 'ok' || b.status === 'zero' ? '' : ' <span class="warn">(' + esc(b.status) + ')</span>';
-                return '<tr><td>' + esc(b.text) + '</td><td>' + b.modelPoints + ' / ' + b.max + '</td><td>' +
+                return '<tr><td>' + esc(b.text) + '</td><td>' + esc(b.verdict) + ' (' + b.modelPoints + ' / ' + b.max + ')</td><td>' +
                     b.points + ' / ' + b.max + flag + '</td><td class="quote">' + esc(b.quote || '-') + '</td></tr>';
             }).join('') + '</table>';
     }
