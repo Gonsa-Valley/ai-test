@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI tunnel test</title>
+<style>
+    :root { --accent: #2563EB; --border: #D1D5DB; --muted: #6B7280; --bad: #B91C1C; --good: #15803D; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 16px; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #111827; background: #F9FAFB; }
+    main { max-width: 820px; margin: 0 auto; }
+    h1 { margin: 0 0 4px; font-size: 22px; color: var(--accent); }
+    h2 { margin: 0 0 10px; font-size: 16px; }
+    p.lead { margin: 0 0 16px; color: var(--muted); font-size: 14px; }
+    section { margin-bottom: 16px; padding: 16px; background: #fff; border: 1px solid var(--border); border-radius: 10px; }
+    label { display: block; margin-top: 10px; font-size: 13px; font-weight: 600; }
+    label.inline { display: flex; align-items: center; gap: 8px; font-weight: 400; margin-top: 12px; }
+    input[type=text], input[type=number], select, textarea { width: 100%; margin-top: 4px; padding: 9px 10px; border: 1px solid var(--border); border-radius: 6px; font: inherit; }
+    textarea { resize: vertical; }
+    .row { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; }
+    button { margin-top: 12px; margin-right: 8px; padding: 9px 16px; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+    button.secondary { background: #fff; color: var(--accent); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .hint { margin-top: 4px; font-size: 12px; color: var(--muted); }
+    pre { margin: 10px 0 0; padding: 10px; overflow: auto; white-space: pre-wrap; word-break: break-word; background: #F3F4F6; border-radius: 6px; font-size: 13px; }
+    .ok { color: var(--good); font-weight: 600; }
+    .err { color: var(--bad); font-weight: 600; }
+    table { width: 100%; margin-top: 10px; border-collapse: collapse; font-size: 14px; }
+    th, td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; }
+    details { margin-top: 10px; }
+    @media (max-width: 560px) { .row { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+    <h1>AI tunnel test</h1>
+    <p class="lead">Checks that this web page can reach the model on your laptop through the tunnel and get a grade back. Nothing you type is saved; it is only sent to the address you enter below.</p>
+
+    <section>
+        <h2>1. Connection</h2>
+        <label for="base">AI address (the https://....trycloudflare.com address from the tunnel window)</label>
+        <input type="text" id="base" placeholder="https://something.trycloudflare.com" autocomplete="off" autocapitalize="off" spellcheck="false">
+
+        <div class="row">
+            <div>
+                <label for="model">Model name</label>
+                <input type="text" id="model" value="qwen3:1.7b" autocomplete="off" autocapitalize="off" spellcheck="false">
+            </div>
+            <div>
+                <label for="timeout">Wait up to (seconds)</label>
+                <input type="number" id="timeout" value="180" min="10" max="600">
+            </div>
+        </div>
+
+        <label class="inline"><input type="checkbox" id="think"> Thinking on (slower, may be more careful)</label>
+
+        <button type="button" id="btnCheck">Check connection</button>
+        <div id="checkOut"></div>
+    </section>
+
+    <section>
+        <h2>2. Grade a sample answer</h2>
+        <label for="sample">Sample</label>
+        <select id="sample">
+            <option value="strong">Strong answer (should score high)</option>
+            <option value="partial">Partial answer (should score in the middle)</option>
+            <option value="weak">Weak answer (should score low)</option>
+            <option value="custom">Custom (edit the boxes below)</option>
+        </select>
+
+        <label for="question">Task</label>
+        <textarea id="question" rows="2"></textarea>
+
+        <label for="rubric">Rubric</label>
+        <textarea id="rubric" rows="6"></textarea>
+
+        <label for="answer">Student answer</label>
+        <textarea id="answer" rows="6"></textarea>
+
+        <label for="max">Maximum score</label>
+        <input type="number" id="max" value="10" min="1" max="1000">
+
+        <button type="button" id="btnGrade">Grade this answer</button>
+        <button type="button" id="btnAll" class="secondary">Run all 3 samples</button>
+        <div id="gradeOut"></div>
+    </section>
+</main>
+
+<script>
+(function () {
+    'use strict';
+
+    const $ = function (id) { return document.getElementById(id); };
+
+    const SAMPLES = {
+        question: 'Explain the difference between RAM and storage (an SSD or hard drive) in a computer.',
+        rubric: '- Describes RAM as temporary working memory that is cleared when power is off (2 points)\n' +
+                '- Describes storage as permanent, keeping data without power (2 points)\n' +
+                '- Mentions that RAM is much faster than storage (2 points)\n' +
+                '- Mentions capacity or cost differences, for example typical sizes (2 points)\n' +
+                '- Gives a clear example of how they work together (2 points)',
+        answers: {
+            strong: 'RAM is the computer\'s temporary working memory. It is volatile, so everything in it disappears when the power is turned off. Storage such as an SSD or hard drive keeps data permanently, even without power. RAM is much faster than storage, but it is also more expensive per gigabyte, so computers usually have 8 to 32 GB of RAM and hundreds of GB or even terabytes of storage. They work together: when you open a game, the program is loaded from storage into RAM so the processor can use it quickly.',
+            partial: 'RAM is memory that the computer uses while it is running programs, and it is faster. Storage is where files are saved, like on the SSD or hard drive. If you turn off the computer the RAM is cleared.',
+            weak: 'RAM and storage are the same thing. Both are used to store files like photos and videos, and the more you have the better the screen looks.'
+        }
+    };
+
+    function loadSample() {
+        const key = $('sample').value;
+        if (key === 'custom') return;
+        $('question').value = SAMPLES.question;
+        $('rubric').value = SAMPLES.rubric;
+        $('answer').value = SAMPLES.answers[key];
+        $('max').value = 10;
+    }
+
+    $('sample').addEventListener('change', loadSample);
+    loadSample();
+
+    // ---------- helpers ----------
+    function baseUrl() {
+        return $('base').value.trim().replace(/\/+$/, '');
+    }
+
+    function show(el, html) { el.innerHTML = html; }
+
+    function esc(text) {
+        const d = document.createElement('div');
+        d.textContent = String(text);
+        return d.innerHTML;
+    }
+
+    function explain(err, status, bodyText) {
+        if (err && err.name === 'AbortError') {
+            return 'Timed out. The model may be slow, still loading, or the tunnel stopped. Raise "Wait up to" and try again.';
+        }
+        if (status === 403) {
+            return 'The server answered 403. The tunnel command is probably missing --http-host-header="localhost:11434", or OLLAMA_ORIGINS does not allow this page. Restart the tunnel with the full command and restart Ollama after setting OLLAMA_ORIGINS.';
+        }
+        if (status === 404) {
+            return 'Answered 404. Check the model name (run "ollama list" on the laptop) and that the address has no extra path at the end.';
+        }
+        if (status === 502 || status === 530 || status === 1033) {
+            return 'The tunnel is up but cannot reach Ollama. Make sure Ollama is running on the laptop and the tunnel points to port 11434.';
+        }
+        if (status) {
+            return 'Server answered ' + status + (bodyText ? ': ' + bodyText.slice(0, 200) : '') + '.';
+        }
+        return 'Could not reach the address ("Failed to fetch"). Common causes: the address is mistyped, the tunnel window was closed, Ollama was not restarted after setting OLLAMA_ORIGINS, or the browser blocked the request (CORS). Open the address in another tab: it should say "Ollama is running".';
+    }
+
+    async function request(path, options) {
+        const ctl = new AbortController();
+        const seconds = Math.max(10, parseInt($('timeout').value, 10) || 180);
+        const timer = setTimeout(function () { ctl.abort(); }, seconds * 1000);
+
+        try {
+            const res = await fetch(baseUrl() + path, Object.assign({}, options, { signal: ctl.signal }));
+            const text = await res.text();
+            return { res: res, text: text };
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
+    // ---------- 1. connection ----------
+    $('btnCheck').addEventListener('click', async function () {
+        const out = $('checkOut');
+        const btn = $('btnCheck');
+
+        if (! baseUrl()) { show(out, '<pre class="err">Enter the AI address first.</pre>'); return; }
+
+        btn.disabled = true;
+        show(out, '<pre>Checking...</pre>');
+
+        try {
+            const r = await request('/api/tags', { method: 'GET' });
+
+            if (! r.res.ok) {
+                show(out, '<pre class="err">' + esc(explain(null, r.res.status, r.text)) + '</pre>');
+            } else {
+                const data = JSON.parse(r.text);
+                const names = (data.models || []).map(function (m) { return m.name; });
+                const wanted = $('model').value.trim();
+                const found = names.indexOf(wanted) !== -1;
+
+                show(out, '<pre><span class="ok">Connected.</span> Models on that laptop: ' +
+                    esc(names.join(', ') || '(none)') + '\n' +
+                    (found ? '<span class="ok">"' + esc(wanted) + '" is installed.</span>'
+                           : '<span class="err">"' + esc(wanted) + '" was not found. Fix the model name above.</span>') + '</pre>');
+            }
+        } catch (err) {
+            show(out, '<pre class="err">' + esc(explain(err)) + '</pre>');
+        }
+
+        btn.disabled = false;
+    });
+
+    // ---------- 2. grading ----------
+    function buildBody(sample, thinkOn) {
+        const max = parseInt(sample.max, 10) || 10;
+
+        return {
+            model: $('model').value.trim(),
+            stream: false,
+            think: thinkOn,
+            keep_alive: '30m',
+            format: {
+                type: 'object',
+                properties: { score: { type: 'integer' }, feedback: { type: 'string' } },
+                required: ['score', 'feedback']
+            },
+            options: { temperature: 0.2 },
+            messages: [
+                {
+                    role: 'system',
+                    content: 'You are a fair teacher grading one student answer strictly against the rubric. Do not give points for things the rubric does not ask for. Reply with JSON only.'
+                },
+                {
+                    role: 'user',
+                    content: 'Task:\n' + sample.question + '\n\nRubric (maximum score ' + max + '):\n' + sample.rubric +
+                             '\n\nStudent answer:\n' + sample.answer +
+                             '\n\nReturn JSON with exactly these keys: "score" (a whole number from 0 to ' + max + ') and "feedback" (two or three short sentences to the student).'
+                }
+            ]
+        };
+    }
+
+    // Returns { ok, seconds, score, feedback, notes[], raw, thinkingChars, error }
+    async function gradeOne(sample) {
+        const started = performance.now();
+        const thinkOn = $('think').checked;
+        const notes = [];
+
+        try {
+            let r = await request('/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(buildBody(sample, thinkOn))
+            });
+
+            // Some models reject the "think" option; retry once without it.
+            if (! r.res.ok && /think/i.test(r.text)) {
+                const body = buildBody(sample, thinkOn);
+                delete body.think;
+                notes.push('Model rejected the think option; retried without it.');
+                r = await request('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+            }
+
+            const seconds = (performance.now() - started) / 1000;
+
+            if (! r.res.ok) {
+                return { ok: false, seconds: seconds, error: explain(null, r.res.status, r.text), notes: notes };
+            }
+
+            const data = JSON.parse(r.text);
+            const content = (data.message && data.message.content) ? data.message.content : '';
+            const thinkingChars = (data.message && data.message.thinking) ? data.message.thinking.length : 0;
+
+            let parsed = null;
+            try {
+                parsed = JSON.parse(content);
+            } catch (e) {
+                const m = content.match(/\{[\s\S]*\}/);
+                if (m) {
+                    try { parsed = JSON.parse(m[0]); notes.push('The reply was not pure JSON; extracted the JSON part from the text.'); } catch (e2) { /* handled below */ }
+                }
+            }
+
+            if (! parsed || typeof parsed.score === 'undefined') {
+                return { ok: false, seconds: seconds, error: 'The model replied, but not with a usable score.', raw: content, notes: notes, thinkingChars: thinkingChars };
+            }
+
+            const max = parseInt(sample.max, 10) || 10;
+            let score = Number(parsed.score);
+
+            if (! isFinite(score)) {
+                return { ok: false, seconds: seconds, error: 'The score was not a number.', raw: content, notes: notes, thinkingChars: thinkingChars };
+            }
+
+            if (score < 0 || score > max) {
+                notes.push('Score ' + score + ' was outside 0-' + max + '; the real system would clamp or reject it.');
+                score = Math.min(max, Math.max(0, score));
+            }
+
+            return {
+                ok: true,
+                seconds: seconds,
+                score: Math.round(score),
+                max: max,
+                feedback: String(parsed.feedback || ''),
+                notes: notes,
+                raw: content,
+                thinkingChars: thinkingChars
+            };
+        } catch (err) {
+            return { ok: false, seconds: (performance.now() - started) / 1000, error: explain(err), notes: notes };
+        }
+    }
+
+    function currentSample() {
+        return {
+            question: $('question').value,
+            rubric: $('rubric').value,
+            answer: $('answer').value,
+            max: $('max').value
+        };
+    }
+
+    function renderResult(r) {
+        if (! r.ok) {
+            return '<pre class="err">' + esc(r.error) + '</pre>' +
+                   (r.raw ? '<details open><summary>What the model sent back</summary><pre>' + esc(r.raw) + '</pre></details>' : '');
+        }
+
+        return '<pre><span class="ok">Graded in ' + r.seconds.toFixed(1) + ' s</span>\n' +
+               'Score: ' + r.score + ' / ' + r.max + '\n' +
+               'Feedback: ' + esc(r.feedback) + '\n' +
+               (r.thinkingChars ? 'Thinking text returned: ' + r.thinkingChars + ' characters\n' : '') +
+               (r.notes.length ? '\nNotes:\n- ' + r.notes.map(esc).join('\n- ') : '') + '</pre>' +
+               '<details><summary>Raw reply</summary><pre>' + esc(r.raw) + '</pre></details>';
+    }
+
+    function setBusy(busy) {
+        $('btnGrade').disabled = busy;
+        $('btnAll').disabled = busy;
+        $('btnCheck').disabled = busy;
+    }
+
+    $('btnGrade').addEventListener('click', async function () {
+        const out = $('gradeOut');
+
+        if (! baseUrl()) { show(out, '<pre class="err">Enter the AI address in step 1 first.</pre>'); return; }
+
+        setBusy(true);
+        show(out, '<pre>Grading... the first request can take longer while the model loads.</pre>');
+        show(out, renderResult(await gradeOne(currentSample())));
+        setBusy(false);
+    });
+
+    $('btnAll').addEventListener('click', async function () {
+        const out = $('gradeOut');
+
+        if (! baseUrl()) { show(out, '<pre class="err">Enter the AI address in step 1 first.</pre>'); return; }
+
+        setBusy(true);
+        const rows = [];
+        const keys = ['strong', 'partial', 'weak'];
+
+        for (let i = 0; i < keys.length; i++) {
+            show(out, '<pre>Grading sample ' + (i + 1) + ' of 3 (' + keys[i] + ')...</pre>' + tableHtml(rows));
+
+            const r = await gradeOne({
+                question: SAMPLES.question,
+                rubric: SAMPLES.rubric,
+                answer: SAMPLES.answers[keys[i]],
+                max: 10
+            });
+
+            rows.push({ key: keys[i], r: r });
+        }
+
+        show(out, tableHtml(rows) + '<p class="hint">A good result: strong scores highest, weak scores lowest, and each grade takes an acceptable time.</p>');
+        setBusy(false);
+    });
+
+    function tableHtml(rows) {
+        if (! rows.length) return '';
+
+        return '<table><tr><th>Sample</th><th>Score</th><th>Time</th><th>Result</th></tr>' +
+            rows.map(function (row) {
+                const r = row.r;
+                return '<tr><td>' + esc(row.key) + '</td><td>' + (r.ok ? r.score + ' / ' + r.max : '-') + '</td><td>' +
+                    r.seconds.toFixed(1) + ' s</td><td>' + (r.ok ? '<span class="ok">OK</span>' : '<span class="err">' + esc(r.error) + '</span>') + '</td></tr>';
+            }).join('') + '</table>';
+    }
+})();
+</script>
+</body>
+</html>
