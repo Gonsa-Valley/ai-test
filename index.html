@@ -67,7 +67,8 @@
 
         <label for="method">Grading method</label>
         <select id="method">
-            <option value="each">One question per criterion (5 small requests, evidence checked)</option>
+            <option value="free">Free-format rubric: the AI reads the rubric first, then one question per criterion</option>
+            <option value="each">One question per criterion (strict rubric lines only, evidence checked)</option>
             <option value="criterion">Per-criterion in one request (evidence checked)</option>
             <option value="simple">Simple (one score from the model)</option>
         </select>
@@ -79,6 +80,13 @@
             <option value="partial">Partial answer (should score in the middle)</option>
             <option value="weak">Weak answer (should score low)</option>
             <option value="custom">Custom (edit the boxes below)</option>
+        </select>
+
+        <label for="rubricStyle">Rubric style (the same five ideas, written three ways)</label>
+        <select id="rubricStyle">
+            <option value="free">Free text, no points</option>
+            <option value="weighted">Weighted by percent, ideas grouped</option>
+            <option value="lines">Strict lines with points</option>
         </select>
 
         <label for="question">Task</label>
@@ -95,6 +103,7 @@
 
         <button type="button" id="btnGrade">Grade this answer</button>
         <button type="button" id="btnAll" class="secondary">Run all 3 samples</button>
+        <button type="button" id="btnReread" class="secondary">Forget rubric reading</button>
         <div id="gradeOut"></div>
     </section>
 </main>
@@ -107,30 +116,42 @@
 
     const SAMPLES = {
         question: 'Explain the difference between RAM and storage (an SSD or hard drive) in a computer.',
-        rubric: '- Describes RAM as temporary working memory that is cleared when power is off (2 points)\n' +
-                '- Describes storage as permanent, keeping data without power (2 points)\n' +
-                '- Mentions that RAM is much faster than storage (2 points)\n' +
-                '- Mentions capacity or cost differences, for example typical sizes (2 points)\n' +
-                '- Gives a clear example of how they work together (2 points)',
+        // The same five ideas written in three different ways, like different advisers would write them.
+        rubrics: {
+            lines: '- Describes RAM as temporary working memory that is cleared when power is off (2 points)\n' +
+                   '- Describes storage as permanent, keeping data without power (2 points)\n' +
+                   '- Mentions that RAM is much faster than storage (2 points)\n' +
+                   '- Mentions capacity or cost differences, for example typical sizes (2 points)\n' +
+                   '- Gives a clear example of how they work together (2 points)',
+            free: 'Students should explain that RAM is temporary working memory which is cleared when the power is off, and that storage (an SSD or hard drive) keeps data permanently. ' +
+                  'A good answer also says RAM is much faster than storage, compares them in size or cost, and gives an example of how they work together, ' +
+                  'such as a program being loaded from storage into RAM. All of these points are worth about the same.',
+            weighted: 'Definitions - 50%: RAM is temporary working memory that is cleared when power is off; storage is permanent and keeps data without power.\n' +
+                      'Comparison - 30%: RAM is much faster than storage; capacity or cost differences.\n' +
+                      'Example - 20%: a clear example of how RAM and storage work together.'
+        },
         answers: {
             strong: 'RAM is the computer\'s temporary working memory. It is volatile, so everything in it disappears when the power is turned off. Storage such as an SSD or hard drive keeps data permanently, even without power. RAM is much faster than storage, but it is also more expensive per gigabyte, so computers usually have 8 to 32 GB of RAM and hundreds of GB or even terabytes of storage. They work together: when you open a game, the program is loaded from storage into RAM so the processor can use it quickly.',
             partial: 'RAM is memory that the computer uses while it is running programs, and it is faster. Storage is where files are saved, like on the SSD or hard drive. If you turn off the computer the RAM is cleared.',
             weak: 'RAM and storage are the same thing. Both are used to store files like photos and videos, and the more you have the better the screen looks.'
         },
         // What a careful human grader would give with the rubric above (used only for comparison).
-        expected: { strong: '10', partial: '4-6', weak: '0-1' }
+        expected: { strong: '10', partial: '3-6', weak: '0-1' }
     };
 
     function loadSample() {
         const key = $('sample').value;
         if (key === 'custom') return;
         $('question').value = SAMPLES.question;
-        $('rubric').value = SAMPLES.rubric;
+        $('rubric').value = SAMPLES.rubrics[$('rubricStyle').value];
         $('answer').value = SAMPLES.answers[key];
         $('max').value = 10;
     }
 
     $('sample').addEventListener('change', loadSample);
+    $('rubricStyle').addEventListener('change', function () {
+        $('rubric').value = SAMPLES.rubrics[$('rubricStyle').value];
+    });
     loadSample();
 
     // ---------- helpers ----------
@@ -537,11 +558,11 @@
     // ---------- 2c. one small question per criterion ----------
     // Each rubric line is checked in its own short request: "does the answer say this? quote it."
     // yes = full points, partly = half points, no = 0. A quote that is not really in the answer sets the line to 0.
-    async function gradeEach(sample) {
+    async function gradeEach(sample, pre) {
         const started = performance.now();
         const thinkOn = $('think').checked;
         const notes = [];
-        const rubric = parseRubric(sample.rubric);
+        const rubric = pre || parseRubric(sample.rubric);
 
         if (! rubric.criteria.length) {
             return {
@@ -666,11 +687,156 @@
         };
     }
 
+    // ---------- 2d. free-format rubric: the AI reads the rubric first ----------
+    // In the real system this happens ONCE per task (when the adviser saves it), and the result is stored.
+    // Here it is cached per rubric text, so all 3 samples are graded with the same reading.
+    const readCache = {};
+
+    // Shares "max" points across the items in proportion to their weights, as whole numbers that add up exactly.
+    // The page does this arithmetic, not the model, so percentages or missing points never break the total.
+    function scalePoints(items, max) {
+        const weights = items.map(function (it) { return Math.max(0, Number(it.points) || 0); });
+        let sum = weights.reduce(function (a, b) { return a + b; }, 0);
+
+        if (sum <= 0) {
+            weights.fill(1);
+            sum = weights.length;
+        }
+
+        const raw = weights.map(function (w) { return w * max / sum; });
+        const pts = raw.map(function (v) { return Math.floor(v); });
+        let left = max - pts.reduce(function (a, b) { return a + b; }, 0);
+
+        raw.map(function (v, i) { return { i: i, frac: v - Math.floor(v) }; })
+            .sort(function (a, b) { return b.frac - a.frac; })
+            .forEach(function (o) {
+                if (left > 0) { pts[o.i]++; left--; }
+            });
+
+        return pts;
+    }
+
+    async function readRubric(sample, notes) {
+        const max = parseInt(sample.max, 10) || 10;
+        const key = $('model').value.trim() + '|' + max + '|' + sample.rubric;
+
+        if (readCache[key]) {
+            return { ok: true, criteria: readCache[key].criteria, seconds: 0, cached: true, raw: readCache[key].raw };
+        }
+
+        const started = performance.now();
+
+        const body = {
+            model: $('model').value.trim(),
+            stream: false,
+            think: $('think').checked,
+            keep_alive: '30m',
+            format: {
+                type: 'object',
+                properties: {
+                    criteria: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: { text: { type: 'string' }, points: { type: 'number' } },
+                            required: ['text', 'points']
+                        }
+                    }
+                },
+                required: ['criteria']
+            },
+            options: { temperature: 0.1 },
+            messages: [
+                {
+                    role: 'system',
+                    content: 'You turn a grading rubric, written by a teacher in any format, into a checklist of separate criteria. Each criterion is one idea that can be checked in a student answer. Keep the wording of the rubric as much as possible and do not add criteria that are not in the rubric. Give every criterion its points: use the points written in the rubric; if the rubric uses percentages or weights, use those numbers; if it gives no points, give every criterion the same number. Reply with JSON only.'
+                },
+                {
+                    role: 'user',
+                    content: 'Total score: ' + max + '\n\nRubric:\n' + sample.rubric +
+                             '\n\nReturn JSON like {"criteria":[{"text":"RAM is temporary memory that is cleared when power is off","points":2}]}.'
+                }
+            ]
+        };
+
+        const r = await chat(body, notes);
+        const seconds = (performance.now() - started) / 1000;
+
+        if (! r.res.ok) {
+            return { ok: false, seconds: seconds, error: explain(null, r.res.status, r.text) };
+        }
+
+        const data = JSON.parse(r.text);
+        const content = (data.message && data.message.content) ? data.message.content : '';
+        const parsed = parseLoose(content, notes);
+
+        if (! parsed || ! Array.isArray(parsed.criteria)) {
+            return { ok: false, seconds: seconds, error: 'The model could not turn the rubric into a criteria list.', raw: content };
+        }
+
+        const items = parsed.criteria.filter(function (c) { return c && String(c.text || '').trim(); });
+
+        if (! items.length) {
+            return { ok: false, seconds: seconds, error: 'The model returned an empty criteria list.', raw: content };
+        }
+
+        if (items.length > 12) {
+            notes.push('The model listed ' + items.length + ' criteria; only the first 12 are used.');
+            items.length = 12;
+        }
+
+        const pts = scalePoints(items, max);
+        const criteria = [];
+
+        items.forEach(function (c, i) {
+            if (pts[i] > 0) criteria.push({ text: String(c.text).trim(), max: pts[i] });
+        });
+
+        readCache[key] = { criteria: criteria, raw: content };
+
+        return { ok: true, criteria: criteria, seconds: seconds, cached: false, raw: content };
+    }
+
+    async function gradeFree(sample) {
+        const started = performance.now();
+        const notes = [];
+
+        try {
+            const read = await readRubric(sample, notes);
+
+            if (! read.ok) {
+                return { ok: false, seconds: (performance.now() - started) / 1000, error: read.error, raw: read.raw, notes: notes };
+            }
+
+            const r = await gradeEach(sample, { criteria: read.criteria, skipped: [] });
+
+            r.seconds = (performance.now() - started) / 1000;
+            r.notes = notes.concat(r.notes || []);
+            r.notes.unshift(read.cached
+                ? 'Rubric reading reused (cached), so no extra time was spent reading the rubric.'
+                : 'The AI read the rubric first in ' + read.seconds.toFixed(1) + ' s (included in the time above). In the real system this happens once per task, not per student.');
+
+            if (! read.cached) {
+                r.raw = 'Rubric reading: ' + read.raw + '\n\n' + (r.raw || '');
+            }
+
+            return r;
+        } catch (err) {
+            return { ok: false, seconds: (performance.now() - started) / 1000, error: explain(err), notes: notes };
+        }
+    }
+
+    $('btnReread').addEventListener('click', function () {
+        Object.keys(readCache).forEach(function (k) { delete readCache[k]; });
+        show($('gradeOut'), '<pre>Rubric reading cleared. The next grade will read the rubric again.</pre>');
+    });
+
     function gradeOne(sample) {
         const m = $('method').value;
 
         if (m === 'simple') return gradeSimple(sample);
         if (m === 'criterion') return gradeCriterion(sample);
+        if (m === 'free') return gradeFree(sample);
 
         return gradeEach(sample);
     }
@@ -735,14 +901,14 @@
         setBusy(true);
         const rows = [];
         const keys = ['strong', 'partial', 'weak'];
-        const label = { simple: 'Simple', criterion: 'Per-criterion in one request', each: 'One question per criterion' }[$('method').value];
+        const label = { simple: 'Simple', criterion: 'Per-criterion in one request', each: 'One question per criterion (strict lines)', free: 'Free-format rubric (AI reads it first)' }[$('method').value] + ' | Rubric style: ' + $('rubricStyle').value;
 
         for (let i = 0; i < keys.length; i++) {
             show(out, '<pre>Grading sample ' + (i + 1) + ' of 3 (' + keys[i] + ')...</pre>' + tableHtml(rows));
 
             const r = await gradeOne({
                 question: SAMPLES.question,
-                rubric: SAMPLES.rubric,
+                rubric: $('rubric').value,
                 answer: SAMPLES.answers[keys[i]],
                 max: 10
             });
