@@ -67,7 +67,8 @@
 
         <label for="method">Grading method</label>
         <select id="method">
-            <option value="criterion">Per-criterion with evidence check (stricter)</option>
+            <option value="each">One question per criterion (5 small requests, evidence checked)</option>
+            <option value="criterion">Per-criterion in one request (evidence checked)</option>
             <option value="simple">Simple (one score from the model)</option>
         </select>
         <div class="hint">Per-criterion: the model must quote the student's own words for each rubric line. If the quote is not really in the answer, that line gets 0, and the page (not the model) adds up the total. It needs rubric lines written like "- text (2 points)".</div>
@@ -413,9 +414,9 @@
                             properties: {
                                 id: { type: 'integer' },
                                 quote: { type: 'string' },
-                                verdict: { type: 'string', enum: ['full', 'partial', 'none'] }
+                                points: { type: 'integer' }
                             },
-                            required: ['id', 'quote', 'verdict']
+                            required: ['id', 'quote', 'points']
                         }
                     },
                     feedback: { type: 'string' }
@@ -426,13 +427,13 @@
             messages: [
                 {
                     role: 'system',
-                    content: 'You are a strict but fair teacher. You check ONE student answer against a list of rubric criteria. For each criterion, give a verdict: "full" if the answer clearly says what the criterion asks, "partial" if it only half says it or is vague, "none" if it does not say it. For "full" and "partial", first copy the exact words from the student answer that show it (3 to 25 words, copied word for word). For "none", use an empty quote. Never give credit for something the student did not write. Reply with JSON only.'
+                    content: 'You are a strict but fair teacher. You check ONE student answer against a list of rubric criteria. For each criterion, first copy the exact words from the student answer that satisfy it (3 to 25 words, copied word for word). If the student answer has no such words, use an empty quote and give 0 points. Never give credit for something the student did not write. Reply with JSON only.'
                 },
                 {
                     role: 'user',
                     content: 'Task:\n' + sample.question + '\n\nCriteria:\n' + list +
                              '\n\nStudent answer:\n"""\n' + sample.answer + '\n"""' +
-                             '\n\nReturn JSON like {"criteria":[{"id":1,"quote":"exact words from the answer","verdict":"full, partial or none"}],"feedback":"..."} with one entry for every criterion, in order. "verdict" is "full" if the answer clearly says what the criterion asks, "partial" if it only half says it or is vague, "none" if it does not say it. "feedback" is two short sentences to the student that mention only what the student actually wrote.'
+                             '\n\nReturn JSON like {"criteria":[{"id":1,"quote":"words copied from the answer","points":0}],"feedback":"..."} with one entry for every criterion, in order. "points" is a whole number from 0 up to that criterion\'s maximum. "feedback" is two short sentences to the student that mention only what the student actually wrote.'
                 }
             ]
         };
@@ -482,8 +483,7 @@
             const breakdown = rubric.criteria.map(function (c, i) {
                 // Match by id; if the model skipped ids, fall back to the same position in the list.
                 const item = parsed.criteria.find(function (x) { return Number(x.id) === i + 1; }) || parsed.criteria[i] || null;
-                const verdict = item ? String(item.verdict || '').trim().toLowerCase() : 'none';
-                const modelPoints = verdict === 'full' ? c.max : (verdict === 'partial' ? Math.ceil(c.max / 2) : 0);
+                const modelPoints = item ? Math.min(c.max, Math.max(0, Math.round(Number(item.points) || 0))) : 0;
                 const quote = item ? String(item.quote || '') : '';
                 let points = modelPoints;
                 let status = 'ok';
@@ -504,7 +504,7 @@
                 total += points;
                 maxTotal += c.max;
 
-                return { text: c.text, max: c.max, verdict: verdict, modelPoints: modelPoints, points: points, quote: quote, status: status };
+                return { text: c.text, max: c.max, modelPoints: modelPoints, points: points, quote: quote, status: status };
             });
 
             const wanted = parseInt(sample.max, 10) || 10;
@@ -533,8 +533,145 @@
         }
     }
 
+    // ---------- 2c. one small question per criterion ----------
+    // Each rubric line is checked in its own short request: "does the answer say this? quote it."
+    // yes = full points, partly = half points, no = 0. A quote that is not really in the answer sets the line to 0.
+    async function gradeEach(sample) {
+        const started = performance.now();
+        const thinkOn = $('think').checked;
+        const notes = [];
+        const rubric = parseRubric(sample.rubric);
+
+        if (! rubric.criteria.length) {
+            return {
+                ok: false,
+                seconds: 0,
+                error: 'No criteria found. Write the rubric with one criterion per line ending in its points, for example "- Mentions that RAM is faster (2 points)".',
+                notes: notes
+            };
+        }
+
+        if (rubric.skipped.length) {
+            notes.push('Rubric lines without points were ignored: ' + rubric.skipped.join(' | '));
+        }
+
+        const answerNorm = norm(sample.answer);
+        const breakdown = [];
+        const raws = [];
+        let total = 0;
+        let maxTotal = 0;
+        let thinkingChars = 0;
+
+        try {
+            for (let i = 0; i < rubric.criteria.length; i++) {
+                const c = rubric.criteria[i];
+
+                const body = {
+                    model: $('model').value.trim(),
+                    stream: false,
+                    think: thinkOn,
+                    keep_alive: '30m',
+                    format: {
+                        type: 'object',
+                        properties: {
+                            quote: { type: 'string' },
+                            met: { type: 'string', enum: ['yes', 'partly', 'no'] }
+                        },
+                        required: ['quote', 'met']
+                    },
+                    options: { temperature: 0.1 },
+                    messages: [
+                        {
+                            role: 'system',
+                            content: 'You check whether a student answer satisfies ONE requirement. Find the words in the student answer that satisfy it and copy them word for word as "quote". Then set "met" to "yes" if the requirement is clearly satisfied, "partly" if it is only partly or vaguely satisfied, or "no" if the answer does not say it. If "no", use an empty quote. Judge by meaning: the student does not have to use the same words as the requirement. Never give credit for something the student did not write. Reply with JSON only.'
+                        },
+                        {
+                            role: 'user',
+                            content: 'Task the student was answering:\n' + sample.question +
+                                     '\n\nRequirement:\n' + c.text +
+                                     '\n\nStudent answer:\n"""\n' + sample.answer + '\n"""' +
+                                     '\n\nReturn JSON like {"quote":"words copied from the answer","met":"yes"}.'
+                        }
+                    ]
+                };
+
+                const r = await chat(body, notes);
+
+                if (! r.res.ok) {
+                    return { ok: false, seconds: (performance.now() - started) / 1000, error: explain(null, r.res.status, r.text), notes: notes };
+                }
+
+                const data = JSON.parse(r.text);
+                const content = (data.message && data.message.content) ? data.message.content : '';
+                thinkingChars += (data.message && data.message.thinking) ? data.message.thinking.length : 0;
+                raws.push((i + 1) + ': ' + content);
+
+                const parsed = parseLoose(content, notes);
+                const verdict = parsed ? String(parsed.met || '').toLowerCase() : '';
+                const quote = parsed ? String(parsed.quote || '') : '';
+
+                let modelPoints = 0;
+                if (verdict === 'yes') modelPoints = c.max;
+                else if (verdict === 'partly') modelPoints = Math.floor(c.max / 2);
+
+                let points = modelPoints;
+                let status = verdict === 'partly' ? 'partly' : (modelPoints ? 'ok' : 'zero');
+
+                if (! parsed) {
+                    status = 'unreadable reply';
+                } else if (modelPoints > 0 && ! quote.trim()) {
+                    points = 0;
+                    status = 'no quote';
+                } else if (modelPoints > 0 && ! quoteFound(quote, answerNorm)) {
+                    points = 0;
+                    status = 'quote not in answer';
+                }
+
+                total += points;
+                maxTotal += c.max;
+                breakdown.push({ text: c.text, max: c.max, modelPoints: modelPoints, points: points, quote: quote, status: status });
+            }
+        } catch (err) {
+            return { ok: false, seconds: (performance.now() - started) / 1000, error: explain(err), notes: notes };
+        }
+
+        const seconds = (performance.now() - started) / 1000;
+        const wanted = parseInt(sample.max, 10) || 10;
+
+        if (maxTotal !== wanted) {
+            notes.push('The rubric points add up to ' + maxTotal + ' but "Maximum score" says ' + wanted + '. The result is out of ' + maxTotal + '.');
+        }
+
+        const changed = breakdown.filter(function (b) { return b.points !== b.modelPoints; }).length;
+        if (changed) {
+            notes.push(changed + ' criterion(s) were set to 0 because the model\'s quote was missing or not found in the student answer.');
+        }
+
+        const credited = breakdown.filter(function (b) { return b.points > 0; }).length;
+        const notFull = breakdown.filter(function (b) { return b.points < b.max; }).map(function (b) { return b.text; });
+        const feedback = 'Credited ' + credited + ' of ' + breakdown.length + ' criteria.' +
+            (notFull.length ? ' Not fully shown in the answer: ' + notFull.join('; ') + '.' : '');
+
+        return {
+            ok: true,
+            seconds: seconds,
+            score: total,
+            max: maxTotal,
+            feedback: feedback,
+            breakdown: breakdown,
+            notes: notes.filter(function (n, i, a) { return a.indexOf(n) === i; }),
+            raw: raws.join('\n'),
+            thinkingChars: thinkingChars
+        };
+    }
+
     function gradeOne(sample) {
-        return $('method').value === 'simple' ? gradeSimple(sample) : gradeCriterion(sample);
+        const m = $('method').value;
+
+        if (m === 'simple') return gradeSimple(sample);
+        if (m === 'criterion') return gradeCriterion(sample);
+
+        return gradeEach(sample);
     }
 
     // ---------- showing results ----------
@@ -551,7 +688,7 @@
         return '<table><tr><th>Criterion</th><th>Model said</th><th>Final</th><th>Evidence quoted</th></tr>' +
             rows.map(function (b) {
                 const flag = b.status === 'ok' || b.status === 'zero' ? '' : ' <span class="warn">(' + esc(b.status) + ')</span>';
-                return '<tr><td>' + esc(b.text) + '</td><td>' + esc(b.verdict) + ' (' + b.modelPoints + ' / ' + b.max + ')</td><td>' +
+                return '<tr><td>' + esc(b.text) + '</td><td>' + b.modelPoints + ' / ' + b.max + '</td><td>' +
                     b.points + ' / ' + b.max + flag + '</td><td class="quote">' + esc(b.quote || '-') + '</td></tr>';
             }).join('') + '</table>';
     }
@@ -597,7 +734,7 @@
         setBusy(true);
         const rows = [];
         const keys = ['strong', 'partial', 'weak'];
-        const label = $('method').value === 'simple' ? 'Simple' : 'Per-criterion';
+        const label = { simple: 'Simple', criterion: 'Per-criterion in one request', each: 'One question per criterion' }[$('method').value];
 
         for (let i = 0; i < keys.length; i++) {
             show(out, '<pre>Grading sample ' + (i + 1) + ' of 3 (' + keys[i] + ')...</pre>' + tableHtml(rows));
