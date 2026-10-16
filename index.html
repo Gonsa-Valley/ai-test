@@ -56,6 +56,10 @@
 
         <label class="inline"><input type="checkbox" id="think"> Thinking on (slower, may be more careful)</label>
 
+        <label for="readModel">Model for reading the rubric (optional; empty = use the model above)</label>
+        <input type="text" id="readModel" placeholder="for example qwen3:4b" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <div class="hint">Rubric reading happens once per task, so it can use a bigger, slower model than the one that grades each student.</div>
+
         <button type="button" id="btnCheck">Check connection</button>
         <button type="button" id="btnWarm" class="secondary">Warm up model</button>
         <div class="hint">Warm up loads the model into memory first, so the first grade is not slowed by loading.</div>
@@ -406,6 +410,13 @@
         return String(s).toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
     }
 
+    // A quote that spans more than two sentences (for example the whole answer) is not evidence for one criterion.
+    function quoteTooBroad(quote) {
+        const pieces = String(quote).split(/\.{3}|\u2026|[.!?]+(?:\s+|$)/).map(norm).filter(function (p) { return p.length >= 4; });
+
+        return pieces.length > 2;
+    }
+
     // True only if every sentence or piece of the quote (split at "..." and at sentence ends) appears word for word in the student's answer.
     // The pieces do not have to be next to each other, because the model sometimes joins two real sentences.
     function quoteFound(quote, answerNorm) {
@@ -605,7 +616,7 @@
                     messages: [
                         {
                             role: 'system',
-                            content: 'You check whether a student answer satisfies ONE requirement. Find the words in the student answer that satisfy it and copy them word for word as "quote". Then set "met" to "yes" if the requirement is clearly satisfied, "partly" if it is only partly or vaguely satisfied, or "no" if the answer does not say it. If "no", use an empty quote. Your quote must contain the main idea of the requirement itself. If the only words you can find are about something else, answer "no" with an empty quote. Use "partly" only when the answer states the idea of the requirement but incompletely. Judge by meaning: the student does not have to use the same words as the requirement. Never give credit for something the student did not write. Reply with JSON only.'
+                            content: 'You check whether a student answer satisfies ONE requirement. Find the words in the student answer that satisfy it and copy them word for word as "quote". Then set "met" to "yes" if the requirement is clearly satisfied, "partly" if it is only partly or vaguely satisfied, or "no" if the answer does not say it. If "no", use an empty quote. Your quote must be short (one or two sentences at most) and must contain the main idea of the requirement itself. If the only words you can find are about something else, answer "no" with an empty quote. Use "partly" only when the answer states the idea of the requirement but incompletely. Judge by meaning: the student does not have to use the same words as the requirement. Never give credit for something the student did not write. Reply with JSON only.'
                         },
                         {
                             role: 'user',
@@ -647,6 +658,9 @@
                 } else if (modelPoints > 0 && ! quoteFound(quote, answerNorm)) {
                     points = 0;
                     status = 'quote not in answer';
+                } else if (modelPoints > 0 && quoteTooBroad(quote)) {
+                    points = 0;
+                    status = 'quote too broad';
                 }
 
                 total += points;
@@ -718,7 +732,8 @@
 
     async function readRubric(sample, notes) {
         const max = parseInt(sample.max, 10) || 10;
-        const key = $('model').value.trim() + '|' + max + '|' + sample.rubric;
+        const readModel = $('readModel').value.trim() || $('model').value.trim();
+        const key = readModel + '|' + max + '|' + sample.rubric;
 
         if (readCache[key]) {
             return { ok: true, criteria: readCache[key].criteria, seconds: 0, cached: true, raw: readCache[key].raw };
@@ -727,7 +742,7 @@
         const started = performance.now();
 
         const body = {
-            model: $('model').value.trim(),
+            model: readModel,
             stream: false,
             think: $('think').checked,
             keep_alive: '30m',
