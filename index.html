@@ -60,6 +60,10 @@
         <input type="text" id="readModel" placeholder="for example qwen3:4b" autocomplete="off" autocapitalize="off" spellcheck="false">
         <div class="hint">Rubric reading happens once per task, so it can use a bigger, slower model than the one that grades each student.</div>
 
+        <label for="checkModel">Model for the second check on credited lines (optional; empty = use the model above)</label>
+        <input type="text" id="checkModel" placeholder="for example qwen3:4b" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <div class="hint">After the model credits a line, a second short request asks whether the quote really shows it. Those requests are tiny, so a bigger model is affordable here.</div>
+
         <button type="button" id="btnCheck">Check connection</button>
         <button type="button" id="btnWarm" class="secondary">Warm up model</button>
         <div class="hint">Warm up loads the model into memory first, so the first grade is not slowed by loading.</div>
@@ -566,6 +570,51 @@
         }
     }
 
+    // ---------- second check: does the quote, on its own, show the requirement? ----------
+    // The model only sees the requirement and its own quote (not the whole answer), which is a much easier
+    // question for a small model. It can lower a credit but never raise one. Returns "yes", "partly", "no",
+    // or null if the check itself failed (then the original credit is kept).
+    async function verifyQuote(requirement, quote, notes) {
+        const model = $('checkModel').value.trim() || $('model').value.trim();
+
+        const body = {
+            model: model,
+            stream: false,
+            think: false,
+            keep_alive: '30m',
+            format: {
+                type: 'object',
+                properties: { shows: { type: 'string', enum: ['yes', 'partly', 'no'] } },
+                required: ['shows']
+            },
+            options: { temperature: 0 },
+            messages: [
+                {
+                    role: 'system',
+                    content: 'You check evidence. You are given a requirement and a quote taken from a student answer. Say "yes" only if the quote by itself clearly shows the requirement is met. Say "partly" if it shows only part of it. Say "no" if the quote is about something else or does not show it. Reply with JSON only.'
+                },
+                {
+                    role: 'user',
+                    content: 'Requirement:\n' + requirement + '\n\nQuote from the student answer:\n"' + quote + '"\n\nReturn JSON like {"shows":"no"}.'
+                }
+            ]
+        };
+
+        try {
+            const r = await chat(body, notes);
+
+            if (! r.res.ok) return null;
+
+            const data = JSON.parse(r.text);
+            const parsed = parseLoose((data.message && data.message.content) ? data.message.content : '', notes);
+            const v = parsed ? String(parsed.shows || '').toLowerCase() : '';
+
+            return (v === 'yes' || v === 'partly' || v === 'no') ? v : null;
+        } catch (err) {
+            return null;
+        }
+    }
+
     // ---------- 2c. one small question per criterion ----------
     // Each rubric line is checked in its own short request: "does the answer say this? quote it."
     // yes = full points, partly = half points, no = 0. A quote that is not really in the answer sets the line to 0.
@@ -663,6 +712,20 @@
                     status = 'quote too broad';
                 }
 
+                // Second check: only for lines that still have credit. It can lower the credit, never raise it.
+                if (points > 0) {
+                    const second = await verifyQuote(c.text, quote, notes);
+
+                    if (second) {
+                        const cap = second === 'yes' ? c.max : (second === 'partly' ? Math.floor(c.max / 2) : 0);
+
+                        if (cap < points) {
+                            points = cap;
+                            status = cap === 0 ? 'quote does not show it' : 'lowered by second check';
+                        }
+                    }
+                }
+
                 total += points;
                 maxTotal += c.max;
                 breakdown.push({ text: c.text, max: c.max, modelPoints: modelPoints, points: points, quote: quote, status: status });
@@ -680,7 +743,7 @@
 
         const changed = breakdown.filter(function (b) { return b.points !== b.modelPoints; }).length;
         if (changed) {
-            notes.push(changed + ' criterion(s) were set to 0 because the model\'s quote was missing or not found in the student answer.');
+            notes.push(changed + ' criterion(s) were lowered by the evidence checks (quote not in the answer, too broad, or not showing the requirement). See the flags in the table.');
         }
 
         const credited = breakdown.filter(function (b) { return b.points > 0; }).length;
