@@ -385,9 +385,10 @@
         return String(s).toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
     }
 
-    // True only if the quote (or every piece of it, when it uses "...") appears in the student's answer.
+    // True only if every sentence or piece of the quote (split at "..." and at sentence ends) appears word for word in the student's answer.
+    // The pieces do not have to be next to each other, because the model sometimes joins two real sentences.
     function quoteFound(quote, answerNorm) {
-        const pieces = String(quote).split(/\.{3}|\u2026/).map(norm).filter(function (p) { return p.length >= 4; });
+        const pieces = String(quote).split(/\.{3}|\u2026|[.!?]+(?:\s+|$)/).map(norm).filter(function (p) { return p.length >= 4; });
 
         if (! pieces.length) return false;
 
@@ -583,7 +584,7 @@
                     messages: [
                         {
                             role: 'system',
-                            content: 'You check whether a student answer satisfies ONE requirement. Find the words in the student answer that satisfy it and copy them word for word as "quote". Then set "met" to "yes" if the requirement is clearly satisfied, "partly" if it is only partly or vaguely satisfied, or "no" if the answer does not say it. If "no", use an empty quote. Judge by meaning: the student does not have to use the same words as the requirement. Never give credit for something the student did not write. Reply with JSON only.'
+                            content: 'You check whether a student answer satisfies ONE requirement. Find the words in the student answer that satisfy it and copy them word for word as "quote". Then set "met" to "yes" if the requirement is clearly satisfied, "partly" if it is only partly or vaguely satisfied, or "no" if the answer does not say it. If "no", use an empty quote. Your quote must contain the main idea of the requirement itself. If the only words you can find are about something else, answer "no" with an empty quote. Use "partly" only when the answer states the idea of the requirement but incompletely. Judge by meaning: the student does not have to use the same words as the requirement. Never give credit for something the student did not write. Reply with JSON only.'
                         },
                         {
                             role: 'user',
